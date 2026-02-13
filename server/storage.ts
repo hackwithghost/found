@@ -1,6 +1,6 @@
 
 import { db } from "./db";
-import { users, products, type User, type InsertUser, type Product, type InsertProduct } from "@shared/schema";
+import { users, products, type User, type InsertUser, type Product, type InsertProduct } from "../shared/schema";
 import { eq } from "drizzle-orm";
 import session from "express-session";
 import connectPg from "connect-pg-simple";

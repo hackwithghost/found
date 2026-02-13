@@ -1,14 +1,14 @@
 import "dotenv/config";
-import express, { type Request, Response, NextFunction } from "express";
+import express, { type Request, type Response, type NextFunction } from "express";
+import { createServer } from "http";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
-import { createServer } from "http";
 
 const app = express();
 const httpServer = createServer(app);
 
 /**
- * Extend IncomingMessage to store rawBody
+ * Extend IncomingMessage to store rawBody (for webhooks if needed)
  */
 declare module "http" {
   interface IncomingMessage {
@@ -17,9 +17,10 @@ declare module "http" {
 }
 
 /**
- * Extend Express User (if you are using auth)
+ * Extend Express User type (if using auth)
  */
-import { User as AppUser } from "@shared/schema";
+import { User as AppUser } from "../shared/schema";
+
 declare global {
   namespace Express {
     interface User extends AppUser {}
@@ -27,58 +28,45 @@ declare global {
 }
 
 /**
- * Middleware
+ * Body Parsing Middleware
  */
 app.use(
   express.json({
     verify: (req: any, _res, buf) => {
       req.rawBody = buf;
     },
-  }),
+  })
 );
 
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: true }));
 
 /**
- * Logger
+ * Logger Utility
  */
-export function log(message: string, source = "express") {
-  const formattedTime = new Date().toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true,
-  });
-
-  console.log(`${formattedTime} [${source}] ${message}`);
+export function log(message: string, source = "server") {
+  const time = new Date().toISOString();
+  console.log(`[${time}] [${source}] ${message}`);
 }
 
 /**
- * Request logging middleware
+ * API Request Logger
  */
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
-  let capturedJsonResponse: Record<string, any> | undefined;
 
-  const originalResJson = res.json.bind(res);
+  const originalJson = res.json.bind(res);
+  let responseBody: unknown;
 
-  res.json = function (bodyJson: any) {
-    capturedJsonResponse = bodyJson;
-    return originalResJson(bodyJson);
+  res.json = (body: any) => {
+    responseBody = body;
+    return originalJson(body);
   };
 
   res.on("finish", () => {
-    const duration = Date.now() - start;
-
     if (path.startsWith("/api")) {
-      let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-
-      if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
-      }
-
-      log(logLine);
+      const duration = Date.now() - start;
+      log(`${req.method} ${path} ${res.statusCode} - ${duration}ms`);
     }
   });
 
@@ -86,43 +74,53 @@ app.use((req, res, next) => {
 });
 
 /**
- * Bootstrap Server
+ * Bootstrap App
  */
-(async () => {
-  await registerRoutes(httpServer, app);
+async function bootstrap() {
+  try {
+    // Register API routes
+    await registerRoutes(httpServer, app);
 
-  /**
-   * Global Error Handler
-   */
-  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
+    /**
+     * Global Error Handler
+     */
+    app.use(
+      (err: any, _req: Request, res: Response, next: NextFunction) => {
+        console.error("Unhandled Error:", err);
 
-    console.error("Internal Server Error:", err);
+        if (res.headersSent) {
+          return next(err);
+        }
 
-    if (res.headersSent) {
-      return next(err);
+        const status = err.status || err.statusCode || 500;
+        res.status(status).json({
+          message: err.message || "Internal Server Error",
+        });
+      }
+    );
+
+    /**
+     * Serve frontend in production
+     */
+    if (process.env.NODE_ENV === "production") {
+      serveStatic(app);
+    } else {
+      const { setupVite } = await import("./vite");
+      await setupVite(httpServer, app);
     }
 
-    return res.status(status).json({ message });
-  });
+    /**
+     * Start Server
+     */
+    const port = Number(process.env.PORT) || 5000;
 
-  /**
-   * Production vs Development setup
-   */
-  if (process.env.NODE_ENV === "production") {
-    serveStatic(app);
-  } else {
-    const { setupVite } = await import("./vite");
-    await setupVite(httpServer, app);
+    httpServer.listen(port, () => {
+      log(`Server running on port ${port}`);
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
   }
+}
 
-  /**
-   * Server Listen (FIXED VERSION — Windows Safe)
-   */
-  const port = parseInt(process.env.PORT || "5000", 10);
-
-  httpServer.listen(port, () => {
-    log(`serving on port ${port}`);
-  });
-})();
+bootstrap();
